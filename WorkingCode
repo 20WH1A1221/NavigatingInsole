@@ -1,0 +1,176 @@
+#include <TinyGPS++.h>
+#include <SoftwareSerial.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+
+// GPS RX and TX pins
+const int GPS_TX_PIN = 16; 
+const int GPS_RX_PIN = 17; 
+SoftwareSerial gpsSerial(GPS_RX_PIN, GPS_TX_PIN);
+
+
+const int LED_RIGHT=5;
+const int LED_LEFT=22;
+
+
+// Ultrasonic sensor pin Declaration
+const int ULTRASONIC_TRIGGER_PIN = 14; 
+const int ULTRASONIC_ECHO_PIN = 15; 
+
+// IR sensor pin Declaration
+const int IR_SENSOR_PIN = 34; 
+
+// Create an instance of the GPS module
+TinyGPSPlus gps;
+
+// GPS navigation parameters
+float destinationLatitude = 0.0;
+float destinationLongitude = 0.0;
+const float turnThreshold = 10.0; // Adjust as needed (in meters)
+
+// Previous GPS coordinates for direction tracking
+float prevLatitude, prevLongitude;
+float prevHeading = 0.0;
+
+// Function to read GPS data
+void readGPS(float* latitude, float* longitude) {
+  while (gpsSerial.available() > 0) {
+    if (gps.encode(gpsSerial.read())) {
+      *latitude = gps.location.lat();
+      *longitude = gps.location.lng();
+    }
+  }
+}
+
+void fetchDestinationCoordinates() {
+  const char* graphHopperApiKey = "b778ec16-2c53-41c7-bf3c-1bb0b56353bd";//APIKey
+
+  // Make an HTTP GET request to the API
+  HTTPClient http;
+  String apiUrl = "https://graphhopper.com/api/1/route?"
+                 "point=" + String(gps.location.lat(), 6) + "," + String(gps.location.lng(), 6) +
+                 "&point=" + String(destinationLatitude, 6) + "," + String(destinationLongitude, 6) +
+                 "&vehicle=car" +
+                 "&locale=en" +
+                 "&key=" + String(graphHopperApiKey);
+  http.begin(apiUrl);
+
+  int httpResponseCode = http.GET();
+  if (httpResponseCode == HTTP_CODE_OK) {
+    String response = http.getString();
+    DynamicJsonDocument jsonDocument(1024);
+    deserializeJson(jsonDocument, response);
+
+    // Parse the JSON response to extract the destination coordinates
+    destinationLatitude = jsonDocument["paths"][0]["points"]["coordinates"][1][1];
+    destinationLongitude = jsonDocument["paths"][0]["points"]["coordinates"][1][0];
+
+    Serial.print("Destination coordinates set to: ");
+    Serial.print(destinationLatitude,  6);
+    Serial.print(", ");
+    Serial.println(destinationLongitude, 6);
+  } else {
+    Serial.print("Failed to fetch destination coordinates. HTTP code: ");
+    Serial.println(httpResponseCode);
+  }
+
+  http.end();
+}
+
+// Function to calculate distance between two GPS points
+float calculateDistance(float lat1, float lon1, float lat2, float lon2) {
+  const float R = 6371000.0; // Earth's radius in meters
+
+  // Convert latitude and longitude from degrees to radians
+  float lat1Rad = radians(lat1);
+  float lon1Rad = radians(lon1);
+  float lat2Rad = radians(lat2);
+  float lon2Rad = radians(lon2);
+
+  //Formula to calculate the distance between two points on a sphere
+  float dLat = lat2Rad - lat1Rad;
+  float dLon = lon2Rad - lon1Rad;
+  float a = sin(dLat / 2) * sin(dLat / 2) + cos(lat1Rad) * cos(lat2Rad) * sin(dLon / 2) * sin(dLon / 2);
+  float c = 2 * atan2(sqrt(a), sqrt(1 - a));
+  float distance = R * c;
+
+  return distance;
+}
+
+
+void controlLEDs(float distanceToDestination, float heading) {
+  
+  const float directionChangeThreshold = 5.0;
+
+  // Calculate the direction change from the previous heading
+  float directionChange = heading - prevHeading;
+  prevHeading = heading;
+
+  // Check for destination proximity and activate both LEDs
+  if (distanceToDestination < turnThreshold) {
+    digitalWrite(LED_LEFT, HIGH);
+    digitalWrite(LED_RIGHT, HIGH);
+  } else {
+    // Check for significant direction change (left or right turn)
+    if (abs(directionChange) >= directionChangeThreshold) {
+      // Determine the turn direction
+      if (directionChange > 0) {
+        // Right turn
+        digitalWrite(LED_LEFT, LOW);
+        digitalWrite(LED_RIGHT, HIGH);
+      } else {
+        // Left turn
+        digitalWrite(LED_LEFT, HIGH);
+        digitalWrite(LED_RIGHT, LOW);
+      }
+    } else {
+      // Straight direction (no significant turn)
+      digitalWrite(LED_LEFT, HIGH);
+      digitalWrite(LED_RIGHT, HIGH);
+    }
+  }
+}
+
+void setup() {
+  // Initialize Serial communication
+  Serial.begin(115200);
+  while (!Serial);
+
+  // Initialize GPS serial communication
+  gpsSerial.begin(115200);
+
+  pinMode(LED_LEFT, OUTPUT);
+  pinMode(LED_RIGHT, OUTPUT);
+
+
+  // Fetch initial destination coordinates from the GraphHopper API
+  fetchDestinationCoordinates();
+}
+
+void loop() {
+  // Read GPS data
+  float latitude, longitude;
+  readGPS(&latitude, &longitude);
+
+  // Update destination coordinates if needed (dynamic destination)
+  if (abs(latitude - destinationLatitude) > 0.00001 || abs(longitude - destinationLongitude) > 0.00001) {
+    destinationLatitude = latitude;
+    destinationLongitude = longitude;
+
+    // Fetch new destination coordinates from the GraphHopper API
+    fetchDestinationCoordinates();
+  }
+
+  // Calculate distance to the destination
+  float distanceToDestination = calculateDistance(latitude, longitude, destinationLatitude, destinationLongitude);
+
+  // Calculate heading (direction) from previous GPS coordinates
+  float heading = atan2(latitude - prevLatitude, longitude - prevLongitude) * (180.0 / PI);
+  controlLEDs(distanceToDestination,heading); 
+  // Store the current GPS coordinates for the next loop iteration
+  prevLatitude = latitude;
+  prevLongitude = longitude;
+  delay(1000);
+}
+
